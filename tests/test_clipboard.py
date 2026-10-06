@@ -12,7 +12,7 @@ from password_tester import clipboard as cb
 class FakeUser32:
     def __init__(self, open_fails=0, set_fails_for=None):
         self.open_fails, self.set_fails_for = open_fails, set_fails_for
-        self.log, self.data, self.formats = [], {}, {}
+        self.log, self.data, self.formats, self.seq = [], {}, {}, 100
 
     def OpenClipboard(self, hwnd):
         self.log.append("open")
@@ -28,7 +28,14 @@ class FakeUser32:
     def EmptyClipboard(self):
         self.log.append("empty")
         self.data.clear()
+        self.seq += 1
         return 1
+
+    def GetClipboardSequenceNumber(self):
+        return self.seq
+
+    def GetClipboardData(self, fmt):
+        return self.data.get(fmt, 0)
 
     def RegisterClipboardFormatW(self, name):
         return self.formats.setdefault(name, 0xC000 + len(self.formats))
@@ -37,6 +44,7 @@ class FakeUser32:
         if fmt == self.set_fails_for:
             return 0
         self.data[fmt] = h
+        self.seq += 1
         return h
 
 
@@ -65,7 +73,9 @@ def make(**kw):
 
     def memmove(dst, src, n):
         k.mem[dst][:n] = src[:n]
-    return cb.WinClipboard(u, k, memmove, retries=3, delay=0), u, k
+    def wstring_at(p):
+        return bytes(k.mem[p]).decode("utf-16-le").split("\0")[0]
+    return cb.WinClipboard(u, k, memmove, wstring_at, retries=3, delay=0), u, k
 
 
 def test_copy_writes_text_and_all_privacy_formats():
@@ -104,18 +114,28 @@ def test_clear_empties_and_closes():
     assert not u.data and u.log[-2:] == ["empty", "close"]
 
 
+def test_read_returns_text_from_windows_not_tk():
+    w, _, _ = make()
+    w.copy("pässwörd")
+    assert w.read() == "pässwörd"
+
+
+def test_clear_if_unchanged_only_clears_our_own_write():
+    w, u, _ = make()
+    seq = w.copy("secret")
+    assert w.clear_if_unchanged(seq) and not u.data
+    seq = w.copy("secret")
+    u.seq += 1                                   # someone else copied something since
+    assert not w.clear_if_unchanged(seq) and u.data
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="real Win32 clipboard")
 def test_real_windows_clipboard():
-    """Overwrites your clipboard while it runs."""
-    tk = pytest.importorskip("tkinter")
+    """Overwrites your clipboard while it runs. Reads via Win32: Tk's view can be stale (see clipdiag)."""
     w = cb.WinClipboard()
-    w.copy("pt-test-é✓")
-    root = tk.Tk()
-    try:
-        assert root.clipboard_get() == "pt-test-é✓"
-        for name in cb.SECRET_FORMATS:
-            assert w.user32.IsClipboardFormatAvailable(w.user32.RegisterClipboardFormatW(name)), name
-        w.clear()
-        assert not w.user32.IsClipboardFormatAvailable(cb.CF_UNICODETEXT)
-    finally:
-        root.destroy()
+    seq = w.copy("pt-test-é✓")
+    assert w.read() == "pt-test-é✓"
+    for name in cb.SECRET_FORMATS:
+        assert w.user32.IsClipboardFormatAvailable(w.user32.RegisterClipboardFormatW(name)), name
+    assert w.clear_if_unchanged(seq)
+    assert w.read() is None

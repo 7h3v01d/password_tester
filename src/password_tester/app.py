@@ -50,7 +50,7 @@ class App(tk.Tk):
         self.result = None
         self.breach = ("", "muted")
         self._last_pw = None
-        self._clip_text, self._clip_job = None, None
+        self._clip_text, self._clip_job, self._clip_seq = None, None, None
         self._winclip = None
         if clipboard.available():
             try:
@@ -508,10 +508,10 @@ class App(tk.Tk):
     def _copy(self, text):
         if not text or text.startswith(("—", "(")):
             return
-        private = False
+        private, self._clip_seq = False, None
         if self._winclip is not None:
             try:
-                self._winclip.copy(text)          # kept out of Win+V history and cloud sync
+                self._clip_seq = self._winclip.copy(text)   # kept out of Win+V history and cloud sync
                 private = True
             except OSError:
                 pass
@@ -525,24 +525,24 @@ class App(tk.Tk):
         self._clip_job = self._after(CLIP_SECONDS * 1000, self._clear_clip)
 
     def _clear_clip(self, final=False):
-        text, self._clip_text, self._clip_job = self._clip_text, None, None
+        text, seq = self._clip_text, self._clip_seq
+        self._clip_text, self._clip_job, self._clip_seq = None, None, None
         if text is None:
             return
-        try:
-            still_ours = self.clipboard_get() == text     # only clear what we put there
-        except tk.TclError:
-            still_ours = False
-        if still_ours:
+        if seq is not None and self._winclip is not None:
+            # Windows path: decide by sequence number. Tk's clipboard_get can return a stale cached
+            # copy after any Tk copy in this process (e.g. Ctrl+C in an entry), so it can't be trusted.
             try:
-                if self._winclip is None:
-                    raise OSError
-                self._winclip.clear()
+                self._winclip.clear_if_unchanged(seq)
             except OSError:
-                try:
+                pass
+        else:
+            try:
+                if self.clipboard_get() == text:      # only clear what we put there
                     self.clipboard_clear()
                     self.clipboard_append("")
-                except tk.TclError:
-                    pass
+            except tk.TclError:
+                pass
         if not final:
             self.status.set("Clipboard cleared.")
 

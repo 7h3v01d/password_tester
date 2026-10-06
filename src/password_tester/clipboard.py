@@ -25,11 +25,12 @@ def available():
 
 
 class WinClipboard:
-    def __init__(self, user32=None, kernel32=None, memmove=None, retries=10, delay=0.02):
+    def __init__(self, user32=None, kernel32=None, memmove=None, wstring_at=None, retries=10, delay=0.02):
         if user32 is None or kernel32 is None:
             user32, kernel32 = self._load()
         self.user32, self.kernel32 = user32, kernel32
         self._memmove = memmove or ctypes.memmove
+        self._wstring_at = wstring_at or ctypes.wstring_at
         self.retries, self.delay = retries, delay
 
     @staticmethod
@@ -42,6 +43,10 @@ class WinClipboard:
                               (u.EmptyClipboard, [], w.BOOL), (u.SetClipboardData, [w.UINT, w.HANDLE], w.HANDLE),
                               (u.RegisterClipboardFormatW, [w.LPCWSTR], w.UINT),
                               (u.IsClipboardFormatAvailable, [w.UINT], w.BOOL),
+                              (u.GetClipboardData, [w.UINT], w.HANDLE),
+                              (u.GetClipboardSequenceNumber, [], w.DWORD),
+                              (u.GetOpenClipboardWindow, [], w.HWND),
+                              (u.GetWindowThreadProcessId, [w.HWND, ctypes.POINTER(w.DWORD)], w.DWORD),
                               (k.GlobalAlloc, [w.UINT, ctypes.c_size_t], w.HGLOBAL),
                               (k.GlobalLock, [w.HGLOBAL], w.LPVOID), (k.GlobalUnlock, [w.HGLOBAL], w.BOOL),
                               (k.GlobalFree, [w.HGLOBAL], w.HGLOBAL)):
@@ -72,7 +77,29 @@ class WinClipboard:
             k.GlobalFree(h)                      # ownership only passes to Windows on success
             raise OSError("SetClipboardData failed")
 
+    def sequence(self):
+        """Bumps on every clipboard write by anyone. Reads don't change it."""
+        return self.user32.GetClipboardSequenceNumber()
+
+    def read(self):
+        """CF_UNICODETEXT straight from Windows (Tk's clipboard_get can return a stale cached copy)."""
+        self._open()
+        try:
+            h = self.user32.GetClipboardData(CF_UNICODETEXT)
+            if not h:
+                return None
+            p = self.kernel32.GlobalLock(h)
+            if not p:
+                return None
+            try:
+                return self._wstring_at(p)
+            finally:
+                self.kernel32.GlobalUnlock(h)
+        finally:
+            self.user32.CloseClipboard()
+
     def copy(self, text):
+        """Returns the clipboard sequence number of this write, for a later clear_if_unchanged()."""
         self._open()
         try:
             if not self.user32.EmptyClipboard():
@@ -84,6 +111,14 @@ class WinClipboard:
                     self._put(fmt, _DWORD_ZERO)
         finally:
             self.user32.CloseClipboard()
+        return self.sequence()
+
+    def clear_if_unchanged(self, seq):
+        """Clear only if nobody has written to the clipboard since our copy. Returns True if cleared."""
+        if seq is None or self.sequence() != seq:
+            return False
+        self.clear()
+        return True
 
     def clear(self):
         self._open()

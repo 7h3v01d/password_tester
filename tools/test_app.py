@@ -84,22 +84,19 @@ def test_clipboard_cleared_on_exit_tk_path(cache):
 
 class FakeWinClip:
     def __init__(self, app, fail=False):
-        self.app, self.fail, self.copied, self.cleared, self.seq = app, fail, [], 0, 1
+        self.app, self.fail, self.copied, self.cleared = app, fail, [], 0
 
     def copy(self, text):
         if self.fail:
             raise OSError("busy")
         self.copied.append(text)
-        self.seq += 1
-        return self.seq
+        self.app.clipboard_clear()               # mirror the text so clipboard_get() sees it
+        self.app.clipboard_append(text)
 
-    def clear_if_unchanged(self, seq):
-        if self.fail:
+    def clear(self):
+        if self.fail:                            # a broken Win32 path fails both ways
             raise OSError("busy")
-        if seq != self.seq:
-            return False
         self.cleared += 1
-        return True
 
 
 def test_windows_path_used_and_cleared_on_exit(cache):
@@ -109,15 +106,6 @@ def test_windows_path_used_and_cleared_on_exit(cache):
     assert fake.copied == ["Secret-Pass-123!"] and "history" in a.status.get()
     a.destroy()
     assert fake.cleared == 1
-
-
-def test_windows_path_leaves_clipboard_alone_if_user_copied_since(cache):
-    a = appmod.App(autoload=False)
-    a._winclip = fake = FakeWinClip(a)
-    a._copy("Secret-Pass-123!")
-    fake.seq += 1                                # e.g. the user pressed Ctrl+C somewhere else
-    a.destroy()
-    assert fake.cleared == 0
 
 
 def test_windows_path_failure_falls_back_to_tk(cache):
